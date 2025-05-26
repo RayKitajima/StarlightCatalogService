@@ -1,0 +1,5 @@
+{
+  "sourceDir": "../CatalogRepository",
+  "targetDir": "../CatalogSite/docs",
+  "baseUrl": "http://localhost:3000"
+}
