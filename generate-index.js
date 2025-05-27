@@ -38,6 +38,8 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const AdmZip = require("adm-zip");
+const os = require("os");
 
 // The JSON file name that, if present in a directory, is read into the "info" field of index.json
 const REPO_METADATA_FILENAME = "repo-metadata.json";
@@ -279,7 +281,18 @@ function recurseAndBuildAllIndexes(sourceDir, targetDir, webRelativePath = "") {
     } else {
       // It's a file. We check if it's JSON or another format.
       const ext = path.extname(entry.name).toLowerCase();
-      if (ext === ".json") {
+      if (ext === ".zip" && getTopLevelFolder(nextRelativePath).toLowerCase() === "programs") {
+        /* ------------------------------------------------------------------
+           A *zipped* Program package exported by the iOS app
+           ------------------------------------------------------------------ */
+        const result = processProgramPackageZip(
+          childSourcePath,        // …/repository/Programs/MyShow.zip
+          targetDir,              // …/docs/Programs
+          nextRelativePath        // Programs/MyShow.zip
+        );
+        if (result) indexItems.push(result);
+
+      } else if (ext === ".json") {
         // Process a JSON entity (if valid)
         const result = processEntityJson(childSourcePath, targetDir, nextRelativePath);
         if (result) {
@@ -312,6 +325,111 @@ function recurseAndBuildAllIndexes(sourceDir, targetDir, webRelativePath = "") {
   const indexFilePath = path.join(targetDir, "index.json");
   fs.writeFileSync(indexFilePath, JSON.stringify(finalIndex, null, 2), "utf-8");
   console.log("Created index.json in:", targetDir);
+}
+
+/**
+ * Handle a .zip that contains a full Program package (.programpkg).
+ * 1. Unzip into a temp folder.
+ * 2. Locate the folder that has an entity.json (the root of the package).
+ * 3. Move that folder into the docs tree with a nice name.
+ * 4. Rewrite local / generated image & audio references to "remote".
+ * 5. Return an index item (digest) so the caller can list it.
+ */
+function processProgramPackageZip(sourceZipPath, parentTargetDir, rawRelativePath) {
+  // ---------- 1) unzip -------------------------------------------------------
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pkg-"));
+  const zip = new AdmZip(sourceZipPath);
+  zip.extractAllTo(tmpRoot, true);
+
+  // find the first entity.json inside the extracted tree
+  const candidate = walkForEntityJson(tmpRoot);
+  if (!candidate) {
+    console.warn("No entity.json inside", sourceZipPath);
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+    return null;
+  }
+  const { entityDir, entityJsonPath } = candidate;
+
+  // ---------- 2) read Program spec ------------------------------------------
+  const programJson = parseJsonFile(entityJsonPath);
+  if (!programJson) {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+    return null;
+  }
+  const digest = parseProgramDigest(programJson.spec || {});
+
+  // decide the final folder name
+  const fallbackName = stripJsonExtension(path.basename(sourceZipPath));
+  const finalFolderName = sanitizeForFilesystem(digest.name || fallbackName);
+
+  // ---------- 3) move folder into docs tree ---------------------------------
+  const destFolder = path.join(parentTargetDir, finalFolderName);
+  ensureDirExists(path.dirname(destFolder));
+  fs.renameSync(entityDir, destFolder);
+
+  // ---------- 4) rewrite media refs inside ALL entity.json files ------------
+  recursivelyRewriteEntityFolder(destFolder, path.posix.join(
+    path.dirname(rawRelativePath.replace(/\.zip$/i, "")), // Programs/…
+    finalFolderName                                       // …/MyShow
+  ));
+
+  // ---------- 5) create index entry -----------------------------------------
+  const parentDirRel = path.posix.dirname(rawRelativePath).replace(/\.zip$/i, "");
+  const indexPath = parentDirRel === "." ? finalFolderName
+                                         : path.posix.join(parentDirRel, finalFolderName);
+
+  return {
+    name: digest.name || fallbackName,
+    path: indexPath,
+    isDirectory: false,
+    digest,
+  };
+}
+
+/* ------------------------------------------------------------------------- */
+/* Helper: walk a directory tree until we find an entity.json                */
+function walkForEntityJson(root) {
+  const stack = [root];
+  while (stack.length) {
+    const dir = stack.pop();
+    const candidate = path.join(dir, "entity.json");
+    if (fs.existsSync(candidate)) {
+      return { entityDir: dir, entityJsonPath: candidate };
+    }
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) stack.push(path.join(dir, entry.name));
+    }
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Helper: recursively fix every entity.json inside a Program package        */
+function recursivelyRewriteEntityFolder(folderAbsPath, webRelPathFromPrograms) {
+  for (const entry of fs.readdirSync(folderAbsPath, { withFileTypes: true })) {
+    const abs = path.join(folderAbsPath, entry.name);
+    if (entry.isDirectory()) {
+      recursivelyRewriteEntityFolder(
+        abs,
+        path.posix.join(webRelPathFromPrograms, entry.name)
+      );
+      continue;
+    }
+    if (entry.name !== "entity.json") continue;
+
+    const json = parseJsonFile(abs);
+    if (!json) continue;
+
+    const topFolder = webRelPathFromPrograms.split("/")[0] || "Programs";
+    extractEmbeddedMediaAndRewrite(
+      json,
+      path.dirname(abs),
+      getEntityImageFilename(topFolder),
+      path.posix.join(webRelPathFromPrograms, entry.name)
+    );
+
+    fs.writeFileSync(abs, JSON.stringify(json, null, 2), "utf-8");
+  }
 }
 
 /**
@@ -538,76 +656,87 @@ function setApiContentImageSource(spec, absoluteUrl) {
  * @param {string} imageFileName    The file name to use for extracted images (e.g. "person.png").
  * @param {string} rawRelativePath  A path used to determine the top-level folder and form final URLs.
  */
-function extractEmbeddedMediaAndRewrite(json, entitySubfolder, imageFileName, rawRelativePath) {
+function extractEmbeddedMediaAndRewrite(
+  json,
+  entitySubfolder,
+  imageFileName,
+  rawRelativePath
+) {
   const spec = json.spec || {};
   const entityType = getTopLevelFolder(rawRelativePath);
 
-  // Build the final relative path for the extracted image
-  const relativeDir = stripJsonExtension(rawRelativePath);
-  const finalRelativeImagePath = path.posix.join(
-    sanitizeForFilesystem(relativeDir),
-    imageFileName
-  );
-  const absoluteImageUrl = `${BASE_URL}/${finalRelativeImagePath}`;
+  // Figure out the final "folder" portion from the rawRelativePath,
+  // e.g. "Programs/MyProgram" (stripping off "entity.json" if present)
+  const parentRel = path.posix.dirname(rawRelativePath);
 
-  // Certain entity types store images in spec.extraData.data.imageSourceJson
-  const isApiContentFamily = ["apicontents", "generativeais", "pagecontents", "catalogs"].includes(
-    entityType.toLowerCase()
-  );
+  // For certain entities (ApiContent, GenerativeAi, etc.) we store image in extraData
+  const isApiContentFamily = [
+    "apicontents",
+    "generativeais",
+    "pagecontents",
+    "catalogs",
+  ].includes(entityType.toLowerCase());
 
-  // 1) Handle embedded or local => remote for the image
+  // 1) If there's an embedded base64 image, decode it (unchanged logic)
   if (spec.embeddedImageBase64) {
-    // If there's an embedded base64 image, decode it.
     try {
       const buffer = Buffer.from(spec.embeddedImageBase64, "base64");
       delete spec.embeddedImageBase64;
 
-      // Write the image file to the subfolder
       const fullImagePathOnDisk = path.join(entitySubfolder, imageFileName);
       fs.writeFileSync(fullImagePathOnDisk, buffer);
       console.log("Wrote embedded image:", fullImagePathOnDisk);
 
-      // Update references
+      const absoluteImageUrl = `${BASE_URL}/${path.posix.join(
+        sanitizeForFilesystem(parentRel),
+        imageFileName
+      )}`;
+
       if (isApiContentFamily) {
         setApiContentImageSource(spec, absoluteImageUrl);
-        delete spec.imageSource; // not used by ApiContent-based
+        delete spec.imageSource; // not used directly
       } else {
         spec.imageSource = { kind: "remote", url: absoluteImageUrl };
       }
     } catch (err) {
       console.warn("Failed to decode embeddedImageBase64:", err);
     }
-  } else {
-    // Convert a local or generated image reference into a remote one, if needed
-    if (
-      spec.imageSource &&
-      (spec.imageSource.kind === "local" || spec.imageSource.kind === "generated")
-    ) {
-      if (isApiContentFamily) {
-        setApiContentImageSource(spec, absoluteImageUrl);
-        delete spec.imageSource;
-      } else {
-        spec.imageSource = { kind: "remote", url: absoluteImageUrl };
-      }
+
+  // 2) If it’s "local" or "generated" but references, say, "images/cover.png",
+  //    just rewrite the JSON to "remote" with full URL. (NO copying—already unzipped.)
+  } else if (
+    spec.imageSource &&
+    (spec.imageSource.kind === "local" || spec.imageSource.kind === "generated")
+  ) {
+    const localRel = spec.imageSource.url || imageFileName;
+    // The final path might be "Programs/MyProgram/images/cover.png"
+    const finalRelImagePath = path.posix.join(
+      sanitizeForFilesystem(parentRel),
+      localRel
+    );
+    const absoluteImageUrl = `${BASE_URL}/${finalRelImagePath}`;
+
+    if (isApiContentFamily) {
+      setApiContentImageSource(spec, absoluteImageUrl);
+      delete spec.imageSource;
+    } else {
+      spec.imageSource = { kind: "remote", url: absoluteImageUrl };
     }
   }
 
-  // 2) If this is a SoundSet, also extract embedded audio from each BGM array
+  // 3) SoundSet audio extraction (same logic as before)
   if (entityType.toLowerCase() === "soundsets") {
     const audioKeys = ["openingBGM", "talkBGM", "newsBGM", "endingBGM", "jingleBGM"];
-
-    // We'll store each file under a "sounds" subfolder, grouped by elementId
     const soundsFolder = path.join(entitySubfolder, "sounds");
     ensureDirExists(soundsFolder);
 
     for (const key of audioKeys) {
       if (!Array.isArray(spec[key])) continue;
-
       for (let i = 0; i < spec[key].length; i++) {
         const element = spec[key][i];
         if (!element || !element.embeddedSoundBase64) continue;
 
-        // We have embedded audio data to extract
+        // existing logic to decode and rewrite ...
         const b64 = element.embeddedSoundBase64;
         delete element.embeddedSoundBase64;
 
@@ -616,36 +745,27 @@ function extractEmbeddedMediaAndRewrite(json, entitySubfolder, imageFileName, ra
 
         try {
           const audioBuffer = Buffer.from(b64, "base64");
-
-          // Use element.id or generate one if missing
           const elementId = element.id || generateUUID();
-
-          // Determine the file extension; default to .m4a if not known
           const extension = embeddedFileName ? path.extname(embeddedFileName) : ".m4a";
           const baseOfFileName = embeddedFileName
             ? path.basename(embeddedFileName, extension)
-            : elementId; // fallback if no file name
+            : elementId;
+          const finalFileName = sanitizeForFilesystem(baseOfFileName) + extension;
 
-          // Construct final file name
-          const finalFileName = sanitizeForFilesystem(baseOfFileName) + (extension || ".m4a");
-
-          // Write the audio file to "sounds/<elementId>/<finalFileName>"
           const elementSubFolder = path.join(soundsFolder, elementId);
           ensureDirExists(elementSubFolder);
 
           const audioPathOnDisk = path.join(elementSubFolder, finalFileName);
           fs.writeFileSync(audioPathOnDisk, audioBuffer);
 
-          // Form the remote URL for this audio file
           const finalRelativeAudio = path.posix.join(
-            sanitizeForFilesystem(relativeDir),
+            sanitizeForFilesystem(parentRel),
             "sounds",
             elementId,
             finalFileName
           );
           const absoluteAudioUrl = `${BASE_URL}/${finalRelativeAudio}`;
 
-          // Update this element's soundSource
           element.soundSource = {
             kind: "remote",
             url: absoluteAudioUrl,
@@ -659,7 +779,7 @@ function extractEmbeddedMediaAndRewrite(json, entitySubfolder, imageFileName, ra
     }
   }
 
-  // Store the updated spec back into json
+  // Done
   json.spec = spec;
 }
 
