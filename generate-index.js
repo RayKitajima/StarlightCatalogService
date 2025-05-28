@@ -367,6 +367,20 @@ function processProgramPackageZip(sourceZipPath, parentTargetDir, rawRelativePat
   ensureDirExists(path.dirname(destFolder));
   fs.renameSync(entityDir, destFolder);
 
+  // Read the *rewritten* program JSON so that image URLs are already remote
+  const progJsonPath = path.join(destFolder, "entity.json");
+  const progJson     = parseJsonFile(progJsonPath);
+  if (progJson) {
+    const blob = buildAggregatedBlob(progJson.spec, destFolder);
+    const aggregated = { ...progJson, ...blob };
+    fs.writeFileSync(
+      path.join(destFolder, "entity+deps.json"),
+      JSON.stringify(aggregated, null, 2),
+      "utf-8"
+    );
+    console.log("Created entity+deps.json in", destFolder);
+  }
+
   // ---------- 4) rewrite media refs inside ALL entity.json files ------------
   recursivelyRewriteEntityFolder(destFolder, path.posix.join(
     path.dirname(rawRelativePath.replace(/\.zip$/i, "")), // Programs/…
@@ -386,6 +400,67 @@ function processProgramPackageZip(sourceZipPath, parentTargetDir, rawRelativePat
   };
 }
 
+/**
+ * Builds the `{ dependencies: … }` section for *entity+deps.json*.
+ * It scans the Program spec for every referenced UUID (top level **and**
+ * nested segments), loads the matching `…/entity.json` files from the
+ * un-zipped package folder, and groups them into
+ *   feeds · apiContents · pageContents · generativeAis
+ * so the importer can hydrate the preview with a single HTTP request.
+ */
+function buildAggregatedBlob(programSpec, pkgRootAbs) {
+  const pick = (rel) =>
+    parseJsonFile(path.join(pkgRootAbs, rel, "entity.json"));
+
+  const feeds          = (programSpec.feedIds        ?? []);
+  const apiContents    = (programSpec.apiContentIds  ?? []);
+  const pageContents   = (programSpec.pageContentIds ?? []);
+  const segmentAI      = new Set();
+  const segmentFeeds   = new Set();
+  const segmentApis    = new Set();
+  const segmentPages   = new Set();
+
+  // walk all segments once to collect ids
+  (function walk(segs) {
+    for (const s of segs) {
+      if (s.generativeAiId) segmentAI.add(s.generativeAiId);
+      if (s.source) {
+        if (s.source.feedId)       segmentFeeds.add(s.source.feedId);
+        if (s.source.apiContentId) segmentApis.add(s.source.apiContentId);
+        if (s.source.pageContentId)segmentPages.add(s.source.pageContentId);
+      }
+      if (Array.isArray(s.subSegments)) walk(s.subSegments);
+    }
+  })(programSpec.programSegments ?? []);
+
+  const deps = {
+    feeds: [
+      ...feeds,
+      ...segmentFeeds,
+    ].map(id => pick(`feed/${id}`)).filter(Boolean),
+
+    apiContents: [
+      ...apiContents,
+      ...segmentApis,
+    ].map(id => pick(`apiContent/${id}`)).filter(Boolean),
+
+    pageContents: [
+      ...pageContents,
+      ...segmentPages,
+    ].map(id => pick(`pageContent/${id}`)).filter(Boolean),
+
+    generativeAis: [
+      programSpec.generatorModelId,
+      programSpec.summarizerModelId,
+      programSpec.translatorModelId,
+      programSpec.coverImageModelId,
+      ...segmentAI,
+    ].filter(Boolean).map(id => pick(`generativeAi/${id}`)).filter(Boolean),
+  };
+
+  return { dependencies: deps };
+}
+
 /* ------------------------------------------------------------------------- */
 /* Helper: walk a directory tree until we find an entity.json                */
 function walkForEntityJson(root) {
@@ -403,11 +478,25 @@ function walkForEntityJson(root) {
   return null;
 }
 
-/* ------------------------------------------------------------------------- */
-/* Helper: recursively fix every entity.json inside a Program package        */
+/**
+ * Walk a folder tree, rewrite every entity.json **and** entity+deps.json
+ * so that any “local / generated / embeddedBase64” media reference becomes
+ * `{ kind:"remote", url:"http://…"}`
+ *
+ * @param {string} folderAbsPath           Absolute path we are scanning
+ * @param {string} webRelPathFromPrograms  Path relative to “…/Programs/…”
+ *                                         (used to build final URLs)
+ */
 function recursivelyRewriteEntityFolder(folderAbsPath, webRelPathFromPrograms) {
-  for (const entry of fs.readdirSync(folderAbsPath, { withFileTypes: true })) {
+  const fsEntries = fs.readdirSync(folderAbsPath, { withFileTypes: true });
+  const topFolder = webRelPathFromPrograms.split("/")[0] || "Programs";
+
+  for (const entry of fsEntries) {
     const abs = path.join(folderAbsPath, entry.name);
+
+    /* ------------------------------------------------------------------ */
+    /* 1) Recurse into sub-directories                                    */
+    /* ------------------------------------------------------------------ */
     if (entry.isDirectory()) {
       recursivelyRewriteEntityFolder(
         abs,
@@ -415,20 +504,66 @@ function recursivelyRewriteEntityFolder(folderAbsPath, webRelPathFromPrograms) {
       );
       continue;
     }
-    if (entry.name !== "entity.json") continue;
 
-    const json = parseJsonFile(abs);
-    if (!json) continue;
+    /* ------------------------------------------------------------------ */
+    /* 2) Normal entity.json inside an entity subfolder                   */
+    /* ------------------------------------------------------------------ */
+    if (entry.name === "entity.json") {
+      const json = parseJsonFile(abs);
+      if (!json) continue;
 
-    const topFolder = webRelPathFromPrograms.split("/")[0] || "Programs";
-    extractEmbeddedMediaAndRewrite(
-      json,
-      path.dirname(abs),
-      getEntityImageFilename(topFolder),
-      path.posix.join(webRelPathFromPrograms, entry.name)
-    );
+      extractEmbeddedMediaAndRewrite(
+        json,                                   // full wrapper object
+        path.dirname(abs),                      // on-disk folder
+        getEntityImageFilename(topFolder),      // person.png / feed.png / …
+        path.posix.join(webRelPathFromPrograms, entry.name)
+      );
 
-    fs.writeFileSync(abs, JSON.stringify(json, null, 2), "utf-8");
+      fs.writeFileSync(abs, JSON.stringify(json, null, 2), "utf-8");
+      continue;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* 3) Aggregated entity+deps.json sitting next to the Program         */
+    /* ------------------------------------------------------------------ */
+    if (entry.name === "entity+deps.json") {
+      const blob = parseJsonFile(abs);
+      if (!blob) continue;
+
+      /* 3-A  · rewrite the Program spec itself ------------------------- */
+      extractEmbeddedMediaAndRewrite(
+        blob,                                   // program wrapper
+        path.dirname(abs),
+        getEntityImageFilename(topFolder),
+        path.posix.join(webRelPathFromPrograms, entry.name)
+      );
+
+      /* 3-B  · rewrite every dependency object ------------------------- */
+      if (blob.dependencies && typeof blob.dependencies === "object") {
+        for (const [depKey, list] of Object.entries(blob.dependencies)) {
+          if (!Array.isArray(list)) continue;
+
+          // feeds → feed.png, apiContents → apicontent.png, …
+          const imgFile = getEntityImageFilename(depKey);
+
+          for (const spec of list) {
+            extractEmbeddedMediaAndRewrite(
+              { spec },                         // wrap to match helper sig
+              path.dirname(abs),
+              imgFile,
+              path.posix.join(webRelPathFromPrograms, entry.name)
+            );
+          }
+        }
+      }
+
+      fs.writeFileSync(abs, JSON.stringify(blob, null, 2), "utf-8");
+      continue;                                // VERY important
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* 4) Anything else (non-JSON files) – ignore here                    */
+    /* ------------------------------------------------------------------ */
   }
 }
 
@@ -665,9 +800,20 @@ function extractEmbeddedMediaAndRewrite(
   const spec = json.spec || {};
   const entityType = getTopLevelFolder(rawRelativePath);
 
-  // Figure out the final "folder" portion from the rawRelativePath,
-  // e.g. "Programs/MyProgram" (stripping off "entity.json" if present)
-  const parentRel = path.posix.dirname(rawRelativePath);
+  // Determine the *real* folder that contains the entity assets.
+  // • For single-file entities (…/Foo.json) we add the file-basename,
+  //   because `processEntityJson()` created a sub-folder with that name.
+  // • For folder entities (…/Foo) the path is already the right one.
+  // If we are patching *entity+deps.json* the assets sit in the same folder,
+  // so don’t append “entity+deps”.
+  const isAggregated = path.posix.basename(rawRelativePath).toLowerCase()
+                         .startsWith("entity+deps");
+  const parentRel = rawRelativePath.toLowerCase().endsWith(".json") && !isAggregated
+    ? path.posix.join(
+        path.posix.dirname(rawRelativePath),
+        stripJsonExtension(path.posix.basename(rawRelativePath))
+      )
+    : path.posix.dirname(rawRelativePath);
 
   // For certain entities (ApiContent, GenerativeAi, etc.) we store image in extraData
   const isApiContentFamily = [
