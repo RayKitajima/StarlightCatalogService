@@ -409,53 +409,146 @@ function processProgramPackageZip(sourceZipPath, parentTargetDir, rawRelativePat
  * so the importer can hydrate the preview with a single HTTP request.
  */
 function buildAggregatedBlob(programSpec, pkgRootAbs) {
-  const pick = (rel) =>
-    parseJsonFile(path.join(pkgRootAbs, rel, "entity.json"));
-
-  const feeds          = (programSpec.feedIds        ?? []);
-  const apiContents    = (programSpec.apiContentIds  ?? []);
-  const pageContents   = (programSpec.pageContentIds ?? []);
-  const segmentAI      = new Set();
-  const segmentFeeds   = new Set();
-  const segmentApis    = new Set();
-  const segmentPages   = new Set();
-
-  // walk all segments once to collect ids
-  (function walk(segs) {
-    for (const s of segs) {
-      if (s.generativeAiId) segmentAI.add(s.generativeAiId);
-      if (s.source) {
-        if (s.source.feedId)       segmentFeeds.add(s.source.feedId);
-        if (s.source.apiContentId) segmentApis.add(s.source.apiContentId);
-        if (s.source.pageContentId)segmentPages.add(s.source.pageContentId);
+  /**
+   * Helper that reads `soundset/<soundSetId>/soundElement/<elementId>/entity.json`
+   * and returns an array of all discovered soundElement objects.
+   */
+  function gatherSoundElements(soundSetId) {
+    const results = [];
+    const soundElementRoot = path.join(pkgRootAbs, "soundset", soundSetId.toString(), "soundElement");
+    if (!fs.existsSync(soundElementRoot)) {
+      return results;
+    }
+    const dirs = fs.readdirSync(soundElementRoot, { withFileTypes: true });
+    for (const dirent of dirs) {
+      if (!dirent.isDirectory()) continue;
+      const elemFolder = path.join(soundElementRoot, dirent.name);
+      const entityPath = path.join(elemFolder, "entity.json");
+      const se = parseJsonFile(entityPath);
+      if (se) {
+        results.push(se);
       }
-      if (Array.isArray(s.subSegments)) walk(s.subSegments);
+    }
+    return results;
+  }
+
+  /**
+   * Simplified "pick" function from your existing code.  This looks up any
+   * `entity.json` at the given relative sub-path and parses it.
+   * If the file does not exist or parsing fails, it returns `null`.
+   */
+  function pick(relPath) {
+    const fullPath = path.join(pkgRootAbs, relPath, "entity.json");
+    if (!fs.existsSync(fullPath)) {
+      return null;
+    }
+    const obj = parseJsonFile(fullPath);
+    if (!obj) {
+      return null; // parse failed
+    }
+
+    // For Person or SoundSet, check if type === "predefined"
+    // or if it's a SoundElement with type === "preInstalled"
+    const spec = obj.spec || {};
+    if (spec.type === "predefined" || spec.type === "preInstalled") {
+      return null;
+    }
+    return obj;
+  }
+
+  // ------------------------------------------------------------------
+  // 1) Gather top-level references for feedIds, apiContentIds, etc.
+  // ------------------------------------------------------------------
+  const feedIds       = programSpec.feedIds        ?? [];
+  const apiContentIds = programSpec.apiContentIds  ?? [];
+  const pageContentIds= programSpec.pageContentIds ?? [];
+  const segmentFeeds  = new Set();
+  const segmentApis   = new Set();
+  const segmentPages  = new Set();
+  const segmentAis    = new Set();
+
+  // Walk segments to pick up feedId / apiContentId / pageContentId / generativeAiId
+  (function walkSegments(segs) {
+    for (const s of segs) {
+      if (s.generativeAiId) {
+        segmentAis.add(s.generativeAiId);
+      }
+      if (s.source) {
+        if (s.source.feedId)        segmentFeeds.add(s.source.feedId);
+        if (s.source.apiContentId)  segmentApis.add(s.source.apiContentId);
+        if (s.source.pageContentId) segmentPages.add(s.source.pageContentId);
+      }
+      if (Array.isArray(s.subSegments)) {
+        walkSegments(s.subSegments);
+      }
     }
   })(programSpec.programSegments ?? []);
 
+  // ------------------------------------------------------------------
+  // 2) Gather persons and soundSets
+  // ------------------------------------------------------------------
+  const personalityIds = programSpec.personalityIds ?? [];
+  const persons = personalityIds
+    .map((pid) => pick(`person/${pid}`))
+    .filter(Boolean);
+
+  let soundSets = [];
+  let soundElements = [];
+
+  if (programSpec.soundSetId) {
+    const sId = programSpec.soundSetId.toString();
+    const sObj = pick(`soundset/${sId}`);
+    if (sObj) {
+      soundSets.push(sObj);
+      // Also gather any local soundElements from that soundSet folder
+      const elementObjs = gatherSoundElements(programSpec.soundSetId);
+      if (elementObjs.length > 0) {
+        soundElements.push(...elementObjs);
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // 3) Gather segment-level generativeAi plus program-level references
+  // ------------------------------------------------------------------
+  const allGenAiIds = [
+    programSpec.generatorModelId,
+    programSpec.summarizerModelId,
+    programSpec.translatorModelId,
+    programSpec.coverImageModelId,
+    ...segmentAis,
+  ].filter(Boolean);
+
+  const generativeAis = allGenAiIds
+    .map((gid) => pick(`generativeAi/${gid}`))
+    .filter(Boolean);
+
+  // ------------------------------------------------------------------
+  // 4) Now build the final dependencies object
+  // ------------------------------------------------------------------
   const deps = {
+    persons,
+    soundSets,
+    soundElements,
     feeds: [
-      ...feeds,
+      ...feedIds,
       ...segmentFeeds,
-    ].map(id => pick(`feed/${id}`)).filter(Boolean),
-
+    ]
+      .map((fid) => pick(`feed/${fid}`))
+      .filter(Boolean),
     apiContents: [
-      ...apiContents,
+      ...apiContentIds,
       ...segmentApis,
-    ].map(id => pick(`apiContent/${id}`)).filter(Boolean),
-
+    ]
+      .map((aid) => pick(`apiContent/${aid}`))
+      .filter(Boolean),
     pageContents: [
-      ...pageContents,
+      ...pageContentIds,
       ...segmentPages,
-    ].map(id => pick(`pageContent/${id}`)).filter(Boolean),
-
-    generativeAis: [
-      programSpec.generatorModelId,
-      programSpec.summarizerModelId,
-      programSpec.translatorModelId,
-      programSpec.coverImageModelId,
-      ...segmentAI,
-    ].filter(Boolean).map(id => pick(`generativeAi/${id}`)).filter(Boolean),
+    ]
+      .map((pid) => pick(`pageContent/${pid}`))
+      .filter(Boolean),
+    generativeAis,
   };
 
   return { dependencies: deps };
