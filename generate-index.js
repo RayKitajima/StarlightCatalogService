@@ -356,7 +356,7 @@ function processProgramPackageZip(sourceZipPath, parentTargetDir, rawRelativePat
     fs.rmSync(tmpRoot, { recursive: true, force: true });
     return null;
   }
-  const digest = parseProgramDigest(programJson.spec || {});
+  let digest = parseProgramDigest(programJson.spec || {});
 
   // decide the final folder name
   const fallbackName = stripJsonExtension(path.basename(sourceZipPath));
@@ -386,6 +386,16 @@ function processProgramPackageZip(sourceZipPath, parentTargetDir, rawRelativePat
     path.dirname(rawRelativePath.replace(/\.zip$/i, "")), // Programs/…
     finalFolderName                                       // …/MyShow
   ));
+
+  /* --------------------------------------------------------------
+   *  Re-read the (now rewritten) Program JSON so that the digest
+   *  we put into index.json carries the new `{ kind:"remote", … }`
+   *  imageSource instead of the original "local"/"generated" form.
+   * -------------------------------------------------------------- */
+  const rewrittenProgram = parseJsonFile(path.join(destFolder, "entity.json"));
+  if (rewrittenProgram && rewrittenProgram.spec) {
+    digest = parseProgramDigest(rewrittenProgram.spec);
+  }
 
   // ---------- 5) create index entry -----------------------------------------
   const parentDirRel = path.posix.dirname(rawRelativePath).replace(/\.zip$/i, "");
@@ -901,12 +911,24 @@ function extractEmbeddedMediaAndRewrite(
   // so don’t append “entity+deps”.
   const isAggregated = path.posix.basename(rawRelativePath).toLowerCase()
                          .startsWith("entity+deps");
-  const parentRel = rawRelativePath.toLowerCase().endsWith(".json") && !isAggregated
-    ? path.posix.join(
+
+  let parentRel;
+  if (rawRelativePath.toLowerCase().endsWith(".json") && !isAggregated) {
+    const base = path.posix.basename(rawRelativePath).toLowerCase();
+
+    // ──► Folder-based entity ⇒ keep the real folder, don’t append “entity”
+    if (base === "entity.json") {
+      parentRel = path.posix.dirname(rawRelativePath);
+    } else {
+      // Single-file entity (Person.json, SoundSet.json, …)
+      parentRel = path.posix.join(
         path.posix.dirname(rawRelativePath),
         stripJsonExtension(path.posix.basename(rawRelativePath))
-      )
-    : path.posix.dirname(rawRelativePath);
+      );
+    }
+  } else {
+    parentRel = path.posix.dirname(rawRelativePath);
+  }
 
   // For certain entities (ApiContent, GenerativeAi, etc.) we store image in extraData
   const isApiContentFamily = [
