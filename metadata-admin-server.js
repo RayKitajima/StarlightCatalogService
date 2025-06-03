@@ -4,262 +4,391 @@
  * metadata-admin-server.js
  *
  * A minimal Node.js server that provides a Web UI to create or edit the
- * `repo-metadata.json` file in the folder that is conceptually your "repository."
- * 
- * This version automatically updates the "lastModified" field to the current time
- * (as epoch seconds) on every save, rather than letting the user input it.
+ * `repo-metadata.json` file in whichever folder inside your "repository" the
+ * user is currently browsing.  It also optionally lets you upload a banner
+ * image (≤ 512 KB) that will be referenced from the metadata JSON.
  *
  * -----------------------------------------------------------------------------
  * WHAT IS THE "METADATA ADMIN"?
  * -----------------------------------------------------------------------------
- * In your backend code, you have a "repository" folder containing various JSON
- * files, images, etc. Meanwhile, your SwiftUI (or other) front-end might call it a
- * "Catalog" for user-friendly naming. Essentially, "Repository" = "Catalog":
+ * In the backend you have a "repository" folder that the front-end (e.g.
+ * SwiftUI) presents to end-users as a "Catalog."  So, "Repository" = "Catalog".
  *
  * - Repository (backend, physically on disk)
- * - Catalog (frontend, user-facing concept)
+ * - Catalog    (frontend, user-facing concept)
  *
- * The metadata in `repo-metadata.json` describes high-level info about this 
- * Repository/Catalog, such as a display name, a description, and a `lastModified`
- * timestamp. This admin server allows you to edit these fields via a simple local
- * web form, without requiring manual edits to the JSON file.
+ * Each folder inside the repository may contain a `repo-metadata.json`
+ * describing that specific sub-catalog: a display name, a description, an
+ * optional `bannerImage` filename, and a `lastModified` timestamp.  This admin
+ * server lets you edit those fields from a browser without hand-editing JSON.
  *
  * -----------------------------------------------------------------------------
+ * BANNER IMAGE
+ * -----------------------------------------------------------------------------
+ * You can upload one optional banner image per directory.  The file is stored
+ * next to the JSON as `banner.<ext>` and its name is saved in the metadata
+ * under `"bannerImage"`.  Maximum accepted size is 512 KB.
  *
+ * -----------------------------------------------------------------------------
+ * DIRECTORY NAVIGATION
+ * -----------------------------------------------------------------------------
+ * The Web UI shows the repository tree so you can drill down into
+ * sub-directories.  Whatever directory you are viewing becomes the "current
+ * repository folder" and that is where metadata is read from / written to, and
+ * where any banner image is stored.
+ *
+ * -----------------------------------------------------------------------------
  * HOW DOES IT FIND THE REPOSITORY FOLDER?
  * -----------------------------------------------------------------------------
- * This script reads the user configuration from `config.json`. In that file, 
- * you'll see fields like "sourceDir" and "targetDir". Here, we take `sourceDir` 
- * as the folder path for the repository (a.k.a. catalog). The default might be 
- * something like "../CatalogRepository", but you can set it to anything you like.
+ * It reads `config.json` located next to this script.  The `sourceDir` field is
+ * taken as the *root* of the repository (e.g. "../CatalogRepository").
  *
- * DISCLAIMER: This is a simple local admin tool, not secure for production.
+ * -----------------------------------------------------------------------------
+ * DISCLAIMER
+ * -----------------------------------------------------------------------------
+ * This is a simple developer-tool intended to run only on localhost.  It is not
+ * production-grade and lacks any authentication or TLS.
  *
+ * -----------------------------------------------------------------------------
+ *
+ * SECURITY NOTE:
+ * This is a small local-only tool.  It **must not** be exposed to
+ * the public internet without proper authentication, HTTPS, etc.
+ * 
  * Usage:
  *   node metadata-admin-server.js
  * Then open http://localhost:4000
  */
 
-const http = require("http");
-const fs = require("fs");
-const path = require("path");
-const querystring = require("querystring");
+const http      = require("http");
+const fs        = require("fs");
+const path      = require("path");
+const queryutil = require("querystring");
+const { URL }   = require("url");
 
-/**
- * Load the user-supplied configuration from "config.json".
- * Exits the script if not found or if there's a parsing error.
- */
+/* ───────────── 1. CONFIG ─────────────────────────────────────────────────── */
+
 function loadConfig() {
-  const configPath = path.join(__dirname, "config.json");
-  if (!fs.existsSync(configPath)) {
-    console.error(`Error: config.json not found at: ${configPath}`);
+  const cfgPath = path.join(__dirname, "config.json");
+  if (!fs.existsSync(cfgPath)) {
+    console.error(`Error: config.json not found at: ${cfgPath}`);
     process.exit(1);
   }
   try {
-    const configRaw = fs.readFileSync(configPath, "utf-8");
-    return JSON.parse(configRaw);
+    return JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
   } catch (err) {
     console.error("Error parsing config.json:", err);
     process.exit(1);
   }
 }
 
-// Read the config to determine the repository folder
-const configData = loadConfig();
+const cfg                 = loadConfig();
+const REPOSITORY_ROOT_DIR = path.resolve(__dirname, cfg.sourceDir);  // absolute
+const METADATA_FILENAME   = "repo-metadata.json";
+const PORT                = 4000;
 
-/**
- * The directory containing the repository (catalog).
- * e.g. "../CatalogRepository"
- */
-const REPOSITORY_DIR = path.resolve(__dirname, configData.sourceDir);
+/* ───────────── 2. METADATA UTILITIES (directory-aware) ───────────────────── */
 
-/**
- * The metadata file name we'll be editing.
- */
-const METADATA_FILENAME = "repo-metadata.json";
+function safeRelPath(rel) {
+  /*  Prevent ".." escapes.  Returns clean relative path (may be ""). */
+  if (!rel) return "";
+  const normal = path.normalize(rel).replace(/^[\\/]+/, ""); // remove leading /
+  if (normal.includes("..")) return "";                      // disallow traversal
+  return normal;
+}
 
-/**
- * The path to the metadata JSON file.
- * e.g. "<repository_folder>/repo-metadata.json"
- */
-const METADATA_PATH = path.join(REPOSITORY_DIR, METADATA_FILENAME);
+function dirFromQuery(searchParams) {
+  return safeRelPath(searchParams.get("dir") || "");
+}
 
-// Port for the metadata admin server
-const PORT = 4000;
+function workingDirFor(rel) {
+  return path.join(REPOSITORY_ROOT_DIR, rel);
+}
 
-/**
- * Utility to read the metadata file if it exists.
- * Returns { name, description, lastModified, ... } or an empty object.
- */
-function readMetadata() {
-  if (fs.existsSync(METADATA_PATH)) {
+function metadataPathFor(dirAbs) {
+  return path.join(dirAbs, METADATA_FILENAME);
+}
+
+function readMetadata(dirAbs) {
+  const p = metadataPathFor(dirAbs);
+  if (fs.existsSync(p)) {
     try {
-      const content = fs.readFileSync(METADATA_PATH, "utf-8");
-      return JSON.parse(content);
-    } catch (error) {
-      console.warn("[MetadataAdmin] Could not parse existing metadata JSON:", error);
-      return {};
+      return JSON.parse(fs.readFileSync(p, "utf-8"));
+    } catch (e) {
+      console.warn("[MetadataAdmin] Could not parse metadata:", e);
     }
-  } else {
-    return {};
   }
+  return {};
 }
 
-/**
- * Utility to write out the metadata file.
- */
-function writeMetadata(metadataObj) {
-  fs.writeFileSync(METADATA_PATH, JSON.stringify(metadataObj, null, 2), "utf-8");
+function writeMetadata(dirAbs, obj) {
+  const p = metadataPathFor(dirAbs);
+  fs.writeFileSync(p, JSON.stringify(obj, null, 2), "utf-8");
 }
 
-/**
- * Returns the current Unix epoch in seconds as a string.
- */
-function getCurrentEpochSeconds() {
-  return Math.floor(Date.now() / 1000).toString();
+/* ───────────── 3. HTML RENDERING ─────────────────────────────────────────── */
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g,  "&amp;")
+    .replace(/"/g,  "&quot;")
+    .replace(/'/g,  "&#39;")
+    .replace(/</g,  "&lt;")
+    .replace(/>/g,  "&gt;");
 }
 
-/**
- * Minimal HTML template rendering. Takes the current metadata object and
- * renders a form for name + description. The "lastModified" field is not shown;
- * we update that automatically on save.
- */
-function renderHtmlPage(metadata) {
-  const { name = "", description = "" } = metadata;
+function renderDirectoryList(currentRel) {
+  const abs   = workingDirFor(currentRel);
+  const parts = currentRel ? currentRel.split(path.sep) : [];
+  const crumbs = ['<a href="/">Root</a>'];
+  let accumRel = "";
+  for (const seg of parts) {
+    accumRel = path.join(accumRel, seg);
+    crumbs.push(`<a href="/?dir=${encodeURIComponent(accumRel)}">${escapeHtml(seg)}</a>`);
+  }
 
-  return `
-<!DOCTYPE html>
+  let links = "";
+  try {
+    const entries = fs.readdirSync(abs, { withFileTypes: true })
+                      .filter(e => e.isDirectory())
+                      .sort((a, b) => a.name.localeCompare(b.name));
+    if (entries.length) {
+      links += "<ul>";
+      for (const d of entries) {
+        const rel = path.join(currentRel, d.name);
+        links += `<li><a href="/?dir=${encodeURIComponent(rel)}">${escapeHtml(d.name)}/</a></li>`;
+      }
+      links += "</ul>";
+    }
+  } catch { /* ignore */ }
+  return `<nav><p>${crumbs.join(" / ")}</p>${links}</nav>`;
+}
+
+function renderHtmlPage(meta, currentRel) {
+  const { name = "", description = "", bannerImage = "" } = meta;
+  const bannerTag = bannerImage
+    ? `<div style="margin-top:1em"><strong>Existing banner:</strong><br>
+         <img src="/asset?dir=${encodeURIComponent(currentRel)}&file=${encodeURIComponent(bannerImage)}"
+              alt="banner" style="max-width:100%;height:auto;border:1px solid #ddd">
+       </div>`
+    : "";
+
+  return `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8" />
   <title>Metadata Admin</title>
   <style>
-    body {
-      font-family: sans-serif; 
-      max-width: 600px; 
-      margin: 40px auto;
-    }
-    label { display: block; margin-top: 1em; font-weight: bold; }
-    input[type="text"], textarea {
-      width: 100%; 
-      padding: 0.5em; 
-      font-family: inherit;
-    }
-    .button-row {
-      margin-top: 1.5em;
-    }
-    button {
-      padding: 0.6em 1.2em; 
-      font-size: 1em;
-    }
-    .notice {
-      margin-top: 1em; 
-      font-size: 0.9em;
-      color: #666;
-    }
+    body      { font-family:sans-serif; max-width:700px; margin:40px auto; }
+    label     { display:block; margin-top:1em; font-weight:bold; }
+    input[type="text"], textarea { width:100%; padding:0.5em; font-family:inherit; }
+    .button-row { margin-top:1.5em; }
+    button    { padding:0.6em 1.2em; font-size:1em; }
+    .notice   { margin-top:1em; font-size:0.9em; color:#666; }
+    nav ul    { margin-left:0; padding-left:1em; }
+    nav li    { list-style-type:disc; margin:2px 0; }
   </style>
 </head>
 <body>
   <h1>Repository (Catalog) Metadata Admin</h1>
-  <form method="POST" action="/save">
+  ${renderDirectoryList(currentRel)}
+  <form method="POST" action="/save?dir=${encodeURIComponent(currentRel)}" enctype="multipart/form-data">
     <label for="name">Repository (Catalog) Name</label>
     <input type="text" id="name" name="name" value="${escapeHtml(name)}" required />
 
     <label for="description">Description</label>
     <textarea id="description" name="description" rows="5">${escapeHtml(description)}</textarea>
 
+    <label for="banner">Banner Image (optional, ≤ 512 KB)</label>
+    <input type="file" id="banner" name="banner" accept="image/*" />
+
     <div class="notice">
-      <strong>Note:</strong> "Last Modified" is automatically updated when you save.
+      <strong>Note 1:</strong> “Last Modified” is automatically updated when you save.<br>
+      <strong>Note 2:</strong> Banner image will overwrite any previous one.<br>
+      <strong>Note 3:</strong> All data are stored inside the selected directory.
     </div>
 
-    <div class="button-row">
-      <button type="submit">Save</button>
-    </div>
+    ${bannerTag}
+
+    <div class="button-row"><button type="submit">Save</button></div>
   </form>
 </body>
-</html>
-  `;
+</html>`;
 }
 
-/**
- * Simple utility to escape HTML special characters in user-inputted strings.
- */
-function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
+/* ───────────── 4. MULTIPART PARSER (built-in, minimal) ───────────────────── */
+
+const MAX_BANNER_SIZE = 512 * 1024;     // 512 KB
 
 /**
- * HTTP server for handling:
- *   GET /  => show the form with current metadata
- *   POST /save => update the metadata file with the submitted form data
+ * parseMultipart(buffer, boundary) → { fields:{}, file?:{filename,buffer} }
+ * Very small subset of RFC 2388 good enough for single file + text fields.
  */
-const server = http.createServer((req, res) => {
-  const { method, url } = req;
+function parseMultipart(buf, boundaryStr) {
+  const dashBoundary = Buffer.from("--" + boundaryStr);
+  const dashBoundaryEnd = Buffer.from("--" + boundaryStr + "--");
 
-  // 1) GET / => serve the form
-  if (method === "GET" && url === "/") {
-    const metadata = readMetadata();
-    const html = renderHtmlPage(metadata);
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(html);
-    return;
+  const parts = [];
+  let start = buf.indexOf(dashBoundary);
+  while (start !== -1) {
+    const end = buf.indexOf(dashBoundary, start + dashBoundary.length);
+    const partBuf = end !== -1 ? buf.slice(start + dashBoundary.length, end)
+                               : buf.slice(start + dashBoundary.length);
+    parts.push(partBuf);
+    start = end;
   }
 
-  // 2) POST /save => parse form data and write out to JSON
-  if (method === "POST" && url === "/save") {
-    let bodyData = "";
-    req.on("data", (chunk) => {
-      bodyData += chunk;
-    });
+  const result = { fields: {} };
 
-    req.on("end", () => {
-      const formFields = querystring.parse(bodyData);
-      const updatedMetadata = {
-        name: formFields.name || "",
-        description: formFields.description || "",
-        // Auto-update lastModified on every save:
-        lastModified: getCurrentEpochSeconds(),
+  for (const raw of parts) {
+    // Trim leading CRLF
+    let pBuf = raw;
+    if (pBuf[0] === 0x0d && pBuf[1] === 0x0a) pBuf = pBuf.slice(2);
+
+    const headerEnd = pBuf.indexOf(Buffer.from("\r\n\r\n"));
+    if (headerEnd === -1) continue;
+
+    const headerText = pBuf.slice(0, headerEnd).toString("utf-8");
+    const body      = pBuf.slice(headerEnd + 4, pBuf.length - 2); // drop trailing CRLF
+
+    const disposition = /Content-Disposition:[^\r\n]+/i.exec(headerText);
+    if (!disposition) continue;
+
+    const nameMatch = /name="([^"]+)"/.exec(disposition[0]);
+    if (!nameMatch) continue;
+    const fieldName = nameMatch[1];
+
+    const filenameMatch = /filename="([^"]*)"/.exec(disposition[0]);
+
+    if (filenameMatch && filenameMatch[1]) {
+      // It's a file
+      result.file = {
+        fieldName,
+        filename: path.basename(filenameMatch[1]),
+        buffer: body
       };
-
-      try {
-        writeMetadata(updatedMetadata);
-        // Show a confirmation page
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(`
-<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8" /><title>Saved</title></head>
-<body>
-  <h1>Metadata Updated</h1>
-  <p><strong>Name:</strong> ${escapeHtml(updatedMetadata.name)}</p>
-  <p><strong>Description:</strong> ${escapeHtml(updatedMetadata.description)}</p>
-  <p><strong>Last Modified:</strong> ${escapeHtml(updatedMetadata.lastModified)}</p>
-  <p><a href="/">Return to Editor</a></p>
-</body>
-</html>
-        `);
-      } catch (error) {
-        console.error("[MetadataAdmin] Failed writing metadata:", error);
-        res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
-        res.end("<h1>500 Internal Server Error</h1><p>Failed to save metadata file.</p>");
-      }
-    });
-    return;
+    } else {
+      // Regular text field
+      result.fields[fieldName] = body.toString("utf-8");
+    }
   }
+  return result;
+}
 
-  // Otherwise, 404
-  res.writeHead(404, { "Content-Type": "text/plain" });
-  res.end("404 Not Found");
+/* ───────────── 5. HTTP SERVER ────────────────────────────────────────────── */
+
+const server = http.createServer((req, res) => {
+  try {
+    const u      = new URL(req.url, `http://${req.headers.host}`);
+    const relDir = dirFromQuery(u.searchParams);          // "" or "sub/dir"
+    const absDir = workingDirFor(relDir);
+
+    // 0. Static asset fetch
+    if (req.method === "GET" && u.pathname === "/asset") {
+      const fileName = safeRelPath(u.searchParams.get("file") || "");
+      if (!fileName) return send404(res);
+      const filePath = path.join(absDir, fileName);
+      if (filePath.indexOf(absDir) !== 0 || !fs.existsSync(filePath)) {
+        return send404(res);
+      }
+      const stream = fs.createReadStream(filePath);
+      res.writeHead(200, { "Content-Type": "application/octet-stream" });
+      return stream.pipe(res);
+    }
+
+    // 1. UI page
+    if (req.method === "GET" && u.pathname === "/") {
+      const meta = readMetadata(absDir);
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      return res.end(renderHtmlPage(meta, relDir));
+    }
+
+    // 2. Save handler
+    if (req.method === "POST" && u.pathname === "/save") {
+      const ctype = req.headers["content-type"] || "";
+      if (!ctype.startsWith("multipart/form-data")) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        return res.end("Expected multipart/form-data");
+      }
+      const boundaryMatch = /boundary=([^;]+)/.exec(ctype);
+      if (!boundaryMatch) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        return res.end("Malformed multipart/form-data (no boundary)");
+      }
+      const boundary = boundaryMatch[1];
+
+      collectRequestBuffer(req, (buf) => {
+        const { fields, file } = parseMultipart(buf, boundary);
+
+        const updated = {
+          name:         fields.name || "",
+          description:  fields.description || "",
+          lastModified: Math.floor(Date.now() / 1000).toString()
+        };
+
+        // Existing metadata to preserve banner if no new file:
+        const existing = readMetadata(absDir);
+        if (existing.bannerImage) updated.bannerImage = existing.bannerImage;
+
+        if (file && file.fieldName === "banner" && file.buffer.length) {
+          if (file.buffer.length > MAX_BANNER_SIZE) {
+            res.writeHead(413, { "Content-Type": "text/plain" });
+            return res.end("Banner image exceeds 512 KB limit.");
+          }
+          const ext = path.extname(file.filename) || ".img";
+          const saveName = "banner" + ext.toLowerCase();
+          const savePath = path.join(absDir, saveName);
+          fs.writeFileSync(savePath, file.buffer);
+          updated.bannerImage = saveName;
+        }
+
+        try {
+          writeMetadata(absDir, updated);
+
+          res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+          res.end(`<!DOCTYPE html><html><head><meta charset="UTF-8"/>
+  <title>Saved</title></head><body>
+  <h1>Metadata Updated</h1>
+  <p><strong>Name:</strong> ${escapeHtml(updated.name)}</p>
+  <p><strong>Description:</strong> ${escapeHtml(updated.description)}</p>
+  <p><strong>Last Modified:</strong> ${escapeHtml(updated.lastModified)}</p>
+  ${updated.bannerImage ? `<p><strong>Banner Image:</strong> ${escapeHtml(updated.bannerImage)}</p>` : ""}
+  <p><a href="/?dir=${encodeURIComponent(relDir)}">Return to Editor</a></p>
+</body></html>`);
+        } catch (e) {
+          console.error("[MetadataAdmin] Write failed:", e);
+          res.writeHead(500, { "Content-Type": "text/plain" });
+          res.end("Failed to save metadata.");
+        }
+      });
+      return;
+    }
+
+    /* fallthrough → 404 */
+    return send404(res);
+  } catch (e) {
+    console.error("[MetadataAdmin] Fatal:", e);
+    res.writeHead(500, { "Content-Type": "text/plain" });
+    res.end("Internal Server Error.");
+  }
 });
 
-// Start the server
+/* ───────────── 6. HELPERS ───────────────────────────────────────────────── */
+
+function collectRequestBuffer(req, cb) {
+  const chunks = [];
+  req.on("data", (c) => chunks.push(c));
+  req.on("end", () => cb(Buffer.concat(chunks)));
+}
+
+function send404(res) {
+  res.writeHead(404, { "Content-Type": "text/plain" });
+  res.end("404 Not Found");
+}
+
+/* ───────────── 7. STARTUP ───────────────────────────────────────────────── */
+
 server.listen(PORT, () => {
   console.log(`Metadata admin server listening on http://localhost:${PORT}/`);
-  console.log(`Using repository folder: ${REPOSITORY_DIR}`);
-  console.log(`Editing file at: ${METADATA_PATH}`);
+  console.log(`Repository root : ${REPOSITORY_ROOT_DIR}`);
 });
