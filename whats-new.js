@@ -81,11 +81,60 @@ const EDITOR_HTML = /*html*/`
 <html lang="en"><meta charset="utf-8">
 <title>What's-New Editor</title>
 <style>
-body{font-family:system-ui,sans-serif;margin:2rem;max-width:50rem}
-input,textarea{width:100%} label{font-weight:600} .row{margin-bottom:1rem}
-table{border-collapse:collapse;width:100%}
-td{padding:.25rem;vertical-align:top}
-button{padding:.5rem 1rem;font-size:1rem}
+/* ----------  Shared base styles ---------- */
+:root{
+  /* Tell the browser we handle both schemes so form controls switch smoothly */
+  color-scheme: light dark;
+  --bg       : #ffffff;
+  --fg       : #000000;
+  --border   : #cccccc;
+  --control  : #f5f5f5;
+  --btn-bg   : #e0e0e0;
+  --btn-fg   : #000000;
+}
+/*  Automatic Dark-mode overrides when the OS is dark */
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg      : #121212;
+    --fg      : #e0e0e0;
+    --border  : #333333;
+    --control : #1e1e1e;
+    --btn-bg  : #333333;
+    --btn-fg  : #ffffff;
+  }
+}
+body{
+  font-family: system-ui, sans-serif;
+  margin: 2rem;
+  max-width: 50rem;
+  background: var(--bg);
+  color: var(--fg);
+}
+input, textarea{
+  width: 100%;
+  background: var(--control);
+  color: var(--fg);
+  border: 1px solid var(--border);
+}
+label{font-weight:600}
+.row{margin-bottom:1rem}
+table{
+  border-collapse: collapse;
+  width: 100%;
+  border: 1px solid var(--border);
+}
+td{
+  padding:.25rem;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border);
+}
+button{
+  padding:.5rem 1rem;
+  font-size:1rem;
+  background: var(--btn-bg);
+  color: var(--btn-fg);
+  border: 1px solid var(--border);
+}
 </style>
 <h1>What's-New Editor</h1>
 <form id="form">
