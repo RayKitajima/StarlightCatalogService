@@ -168,8 +168,9 @@ function renderHtmlPage(meta, currentRel) {
   const { name = "", description = "", bannerImage = "" } = meta;
   const bannerTag = bannerImage
     ? `<div style="margin-top:1em"><strong>Existing banner:</strong><br>
-         <img src="/asset?dir=${encodeURIComponent(currentRel)}&file=${encodeURIComponent(bannerImage)}"
-              alt="banner" style="max-width:100%;height:auto;border:1px solid #ddd">
+         <img class="banner" 
+             src="/asset?dir=${encodeURIComponent(currentRel)}&file=${encodeURIComponent(bannerImage)}"
+             alt="banner" style="max-width:100%;height:auto;border:1px solid #ddd">
        </div>`
     : "";
 
@@ -179,14 +180,43 @@ function renderHtmlPage(meta, currentRel) {
   <meta charset="UTF-8" />
   <title>Metadata Admin</title>
   <style>
-    body      { font-family:sans-serif; max-width:700px; margin:40px auto; }
+    /* ─────────────  Light / Dark theme (same palette as whats-new.js) ───────────── */
+    :root{
+      /* Tell the browser we handle both schemes so native widgets switch too */
+      color-scheme: light dark;
+      --bg       : #ffffff;
+      --fg       : #000000;
+      --border   : #cccccc;
+      --control  : #f5f5f5;
+      --btn-bg   : #e0e0e0;
+      --btn-fg   : #000000;
+    }
+    @media (prefers-color-scheme: dark){
+      :root{
+        --bg      : #121212;
+        --fg      : #e0e0e0;
+        --border  : #333333;
+        --control : #1e1e1e;
+        --btn-bg  : #333333;
+        --btn-fg  : #ffffff;
+      }
+    }
+    /* ─────────────  Component styles  ───────────── */
+    body      { font-family:sans-serif; max-width:700px; margin:40px auto;
+                background:var(--bg); color:var(--fg); }
     label     { display:block; margin-top:1em; font-weight:bold; }
-    input[type="text"], textarea { width:100%; padding:0.5em; font-family:inherit; }
+    input[type="text"], textarea {
+                width:100%; padding:0.5em; font-family:inherit;
+                background:var(--control); color:var(--fg);
+                border:1px solid var(--border); }
     .button-row { margin-top:1.5em; }
-    button    { padding:0.6em 1.2em; font-size:1em; }
-    .notice   { margin-top:1em; font-size:0.9em; color:#666; }
+    button    { padding:0.6em 1.2em; font-size:1em;
+                background:var(--btn-bg); color:var(--btn-fg);
+                border:1px solid var(--border); }
+    .notice   { margin-top:1em; font-size:0.9em; color:var(--fg); opacity:.70; }
     nav ul    { margin-left:0; padding-left:1em; }
     nav li    { list-style-type:disc; margin:2px 0; }
+    img.banner{ max-width:100%; height:auto; border:1px solid var(--border); }
   </style>
 </head>
 <body>
