@@ -220,6 +220,20 @@ function main() {
     process.exit(1);
   }
   clearDocsFolder(TARGET_DIR);
+
+  // ---------------------------------------------------------------
+  // If a "whats-new.json" exists at the root of the repository,
+  // copy it verbatim to the *root* of the generated docs folder.
+  // ---------------------------------------------------------------
+  const whatsNewSrc = path.join(SOURCE_DIR, "whats-new.json");
+  if (fs.existsSync(whatsNewSrc)) {
+    // Ensure the target root exists in case clearDocsFolder() just deleted it
+    ensureDirExists(TARGET_DIR);
+    const whatsNewDst = path.join(TARGET_DIR, "whats-new.json");
+    copyFile(whatsNewSrc, whatsNewDst);
+    console.log(`Copied whats-new.json → ${whatsNewDst}`);
+  }
+
   recurseAndBuildAllIndexes(SOURCE_DIR, TARGET_DIR);
 }
 
@@ -266,8 +280,12 @@ function recurseAndBuildAllIndexes(sourceDir, targetDir, webRelativePath = "") {
 
   // For each file/folder in sourceDir
   for (const entry of entries) {
-    // Skip hidden/system files or an existing index.json
-    if (entry.name.startsWith(".") || entry.name === "index.json") {
+    // Skip hidden/system files, index.json, or the special whats-new.json
+    if (
+      entry.name.startsWith(".") ||
+      entry.name === "index.json" ||
+      entry.name === "whats-new.json"
+    ) {
       continue;
     }
 
