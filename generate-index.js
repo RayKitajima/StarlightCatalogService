@@ -5,20 +5,20 @@
  *
  * Summary:
  * -------
- * This script processes a source repository of JSON entities and other files, 
- * then generates a structured output folder. 
- * Although we refer to the input folder as "repository/" and the output folder 
- * as "docs/", both names are purely conceptual here. Their actual values 
+ * This script processes a source repository of JSON entities and other files,
+ * then generates a structured output folder.
+ * Although we refer to the input folder as "repository/" and the output folder
+ * as "docs/", both names are purely conceptual here. Their actual values
  * (sourceDir and targetDir) are specified in the user-provided config.json.
  *
  * Key Steps:
  * ----------
- * 1) **Clear the target folder**: Removes any existing contents of the output directory 
+ * 1) **Clear the target folder**: Removes any existing contents of the output directory
  *    (conceptually called "docs/") to ensure a fresh start.
  * 2) **Recursively scan the source directory** (conceptually "repository/").
  * 3) **For each entity** (a .json file or a folder containing "entity.json"):
  *    a) Parse the JSON to detect its "digest" (id, name, etc.) and entity type.
- *    b) Create a subfolder in the target directory, extracting embedded media 
+ *    b) Create a subfolder in the target directory, extracting embedded media
  *       (images/audio) and rewriting references to remote URLs.
  *    c) Write the final entity JSON and produce an index entry referencing it.
  * 4) **For non-JSON files**, copy them as-is and note a `downloadURL` in the index.
@@ -67,13 +67,13 @@ function loadConfig() {
 const configData = loadConfig();
 
 // Pull out the key config fields. Convert the paths to absolute paths.
-// The source and target folder names come from config.json; 
-// we conceptually refer to them as "repository/" and "docs/", 
+// The source and target folder names come from config.json;
+// we conceptually refer to them as "repository/" and "docs/",
 // but they can be any valid directory paths.
 const SOURCE_DIR = path.resolve(__dirname, configData.sourceDir);
 const TARGET_DIR = path.resolve(__dirname, configData.targetDir);
 
-// This baseUrl is used to build the `downloadURL` and to rewrite references 
+// This baseUrl is used to build the `downloadURL` and to rewrite references
 // to images/audio as remote URLs.
 const BASE_URL = configData.baseUrl || "";
 
@@ -167,6 +167,25 @@ function sanitizeForFilesystem(name) {
 }
 
 /**
+ * Sanitize every segment of a relative path ("Foo Bar/Baz.json" → "Foo-Bar/Baz").
+ */
+function sanitizeWholePath(relPath = "") {
+  return relPath
+    .split(/[\\/]/)
+    .map(sanitizeForFilesystem)
+    .filter(Boolean)
+    .join("/");
+}
+
+/**
+ * Turn "repo/Art/banner.png" into "http://localhost:3000/repo/Art/banner.png".
+ */
+function absoluteBannerUrl(relativeFolder, bannerFile) {
+  if (!bannerFile) return null;
+  return `${BASE_URL}/${path.posix.join(sanitizeWholePath(relativeFolder), bannerFile)}`;
+}
+
+/**
  * Removes the trailing ".json" extension from a string, if present (case-insensitive).
  */
 function stripJsonExtension(filePath) {
@@ -220,15 +239,26 @@ function main() {
  *
  * @param {string} sourceDir        The source folder to read.
  * @param {string} targetDir        The target folder to write.
- * @param {string} webRelativePath  A relative path (used to build final URLs). 
+ * @param {string} webRelativePath  A relative path (used to build final URLs).
  *                                  Defaults to "" at the top-level.
  */
 function recurseAndBuildAllIndexes(sourceDir, targetDir, webRelativePath = "") {
   // Ensure the target folder exists (it might not if it's newly created).
   ensureDirExists(targetDir);
 
-  // Attempt to read any local metadata file (repo-metadata.json)
+  // Attempt to read any local metadata file (repo-metadata.json) and copy/banner
   let dirMetadata = readRepoMetadata(sourceDir) || {};
+
+  if (dirMetadata.bannerImage) {
+    const bannerSrc = path.join(sourceDir, dirMetadata.bannerImage);
+    const bannerDst = path.join(targetDir, dirMetadata.bannerImage);
+    if (fs.existsSync(bannerSrc)) {
+      copyFile(bannerSrc, bannerDst);
+      dirMetadata.bannerImageUrl = absoluteBannerUrl(webRelativePath, dirMetadata.bannerImage);
+    } else {
+      console.warn("Banner image listed but not found:", bannerSrc);
+    }
+  }
 
   // Read entries in the current sourceDir
   const entries = fs.readdirSync(sourceDir, { withFileTypes: true });
@@ -269,13 +299,31 @@ function recurseAndBuildAllIndexes(sourceDir, targetDir, webRelativePath = "") {
         }
       } else {
         // => A normal subfolder (no "entity.json"), so we recurse
+
+        // Read child metadata *before* recursing so it can appear in this index
+        const childMetadata = readRepoMetadata(childSourcePath) || {};
+        const childDisplay = childMetadata.name || entry.name;
+        const childBannerUrl = childMetadata.bannerImage
+          ? absoluteBannerUrl(nextRelativePath, childMetadata.bannerImage)
+          : undefined;
+
         const subTargetDir = path.join(targetDir, sanitizeForFilesystem(entry.name));
         recurseAndBuildAllIndexes(childSourcePath, subTargetDir, nextRelativePath);
 
+        // copy child banner image into docs tree, if any
+        if (childMetadata.bannerImage) {
+          const bIn = path.join(childSourcePath, childMetadata.bannerImage);
+          const bOut = path.join(subTargetDir, childMetadata.bannerImage);
+          if (fs.existsSync(bIn)) copyFile(bIn, bOut);
+        }
+
         indexItems.push({
-          name: entry.name,
+          name: childDisplay,
           path: sanitizeForFilesystem(entry.name),
           isDirectory: true,
+          description: childMetadata.description || undefined,
+          bannerImage: childBannerUrl,
+          info: Object.keys(childMetadata).length ? childMetadata : undefined,
         });
       }
     } else {
@@ -299,19 +347,18 @@ function recurseAndBuildAllIndexes(sourceDir, targetDir, webRelativePath = "") {
           indexItems.push(result);
         }
       } else {
-        // Non-JSON file => copy as-is
-        const childTargetPath = path.join(targetDir, sanitizeForFilesystem(entry.name));
+        /* ---------------------------------------------------------------
+           Non-JSON file (e.g. banner.jpg, README.md, thumb.db, etc.)
+
+           – Still copy the file so relative links keep working (e.g. the
+             folder’s bannerImage), **but** do NOT surface it in the
+             generated index.json – the client doesn’t need to see it.
+        ---------------------------------------------------------------- */
+        const childTargetPath = path.join(
+          targetDir,
+          sanitizeForFilesystem(entry.name)
+        );
         copyFile(childSourcePath, childTargetPath);
-
-        // Provide a download URL in the index
-        const downloadURL = `${BASE_URL}/${sanitizeForFilesystem(nextRelativePath)}`;
-
-        indexItems.push({
-          name: entry.name,
-          path: sanitizeForFilesystem(entry.name),
-          isDirectory: false,
-          downloadURL,
-        });
       }
     }
   }
@@ -672,10 +719,10 @@ function recursivelyRewriteEntityFolder(folderAbsPath, webRelPathFromPrograms) {
 
 /**
  * Process a directory containing "entity.json" as a single entity.
- * The folder as a whole is treated as one item with `isDirectory: false` 
- * in the parent's index.json. 
+ * The folder as a whole is treated as one item with `isDirectory: false`
+ * in the parent's index.json.
  *
- * Internally, we still create a matching subfolder in the target directory 
+ * Internally, we still create a matching subfolder in the target directory
  * (conceptually "docs/") to place the final entity.json, extracted images/audio, etc.
  *
  * @param {string} folderSourcePath  The path of the source folder.
@@ -742,7 +789,7 @@ function processEntityFolder(folderSourcePath, parentTargetDir, rawRelativePath,
 
 /**
  * Process a single JSON file that is not already in a dedicated folder.
- * We parse the file, create a subfolder with the same base name, 
+ * We parse the file, create a subfolder with the same base name,
  * extract any media, rewrite references, and produce "entity.json".
  *
  * @param {string} sourcePath        The .json file to read.
@@ -880,13 +927,13 @@ function setApiContentImageSource(spec, absoluteUrl) {
 }
 
 /**
- * Extracts embedded media (image/audio) from an entity JSON (if present) and 
+ * Extracts embedded media (image/audio) from an entity JSON (if present) and
  * rewrites references to use remote URLs pointing to the extracted files.
  *
  * Steps:
- * 1) If `spec.embeddedImageBase64` is present, decode and write out an image file, 
+ * 1) If `spec.embeddedImageBase64` is present, decode and write out an image file,
  *    then rewrite `spec.imageSource` or `spec.extraData.data.imageSourceJson` to a remote reference.
- * 2) If it's a SoundSet, look for embedded audio in certain keys and decode each 
+ * 2) If it's a SoundSet, look for embedded audio in certain keys and decode each
  *    to a "sounds/<elementId>/<filename>" path, then rewrite `soundSource` to `kind:"remote"`.
  *
  * @param {object} json             The entity JSON object (parsed).
@@ -1046,8 +1093,8 @@ function extractEmbeddedMediaAndRewrite(
 
 /**
  * Build a "digest" object that describes an entity in minimal form (id, name, etc.).
- * The structure depends on the entity type. 
- * 
+ * The structure depends on the entity type.
+ *
  * @param {object} rootJson       The parsed entity JSON, expected to have a `spec` field.
  * @param {string} topFolderName  The name of the top-level folder, indicating entity type.
  * @returns {object}              The constructed digest with standard fields.
@@ -1239,7 +1286,7 @@ function parseCatalogDigest(m) {
 }
 
 /**
- * Attempt to decode the image source from `spec.imageSource` 
+ * Attempt to decode the image source from `spec.imageSource`
  * or `spec.extraData.data.imageSourceJson` (for ApiContent-based entities).
  *
  * Returns a fallback { kind: "bundle", name: "no_image" } if nothing is found or if parsing fails.
