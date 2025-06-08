@@ -347,17 +347,43 @@ function recurseAndBuildAllIndexes(sourceDir, targetDir, webRelativePath = "") {
     } else {
       // It's a file. We check if it's JSON or another format.
       const ext = path.extname(entry.name).toLowerCase();
-      if (ext === ".zip" && getTopLevelFolder(nextRelativePath).toLowerCase() === "programs") {
-        /* ------------------------------------------------------------------
-           A *zipped* Program package exported by the iOS app
-           ------------------------------------------------------------------ */
-        const result = processProgramPackageZip(
-          childSourcePath,        // …/repository/Programs/MyShow.zip
-          targetDir,              // …/docs/Programs
-          nextRelativePath        // Programs/MyShow.zip
-        );
-        if (result) indexItems.push(result);
-
+      if (ext === ".zip") {
+        const topFolder = getTopLevelFolder(nextRelativePath).toLowerCase();
+        if (topFolder === "programs") {
+          /* ------------------------------------------------------------------
+             A *zipped* Program package exported by the iOS app
+             ------------------------------------------------------------------ */
+          const result = processProgramPackageZip(
+            childSourcePath,        // …/repository/Programs/MyShow.zip
+            targetDir,              // …/docs/Programs
+            nextRelativePath        // Programs/MyShow.zip
+          );
+          if (result) indexItems.push(result);
+        } else if (
+          [
+            "persons",
+            "feeds",
+            "soundsets",
+            "generativeais",
+            "pagecontents",
+            "apicontents",
+            "broadcasts",
+            "catalogs",
+          ].includes(topFolder)
+        ) {
+          const result = processEntityPackageZip(
+            childSourcePath,
+            targetDir,
+            nextRelativePath
+          );
+          if (result) indexItems.push(result);
+        } else {
+          const childTargetPath = path.join(
+            targetDir,
+            sanitizeForFilesystem(entry.name)
+          );
+          copyFile(childSourcePath, childTargetPath);
+        }
       } else if (ext === ".json") {
         // Process a JSON entity (if valid)
         const result = processEntityJson(childSourcePath, targetDir, nextRelativePath);
@@ -466,6 +492,73 @@ function processProgramPackageZip(sourceZipPath, parentTargetDir, rawRelativePat
   const parentDirRel = path.posix.dirname(rawRelativePath).replace(/\.zip$/i, "");
   const indexPath = parentDirRel === "." ? finalFolderName
                                          : path.posix.join(parentDirRel, finalFolderName);
+
+  return {
+    name: digest.name || fallbackName,
+    path: indexPath,
+    isDirectory: false,
+    digest,
+  };
+}
+
+/**
+ * Handle a .zip that contains a generic entity package (.personpkg, .feedpkg, ...).
+ * The steps are similar to processProgramPackageZip but without building an aggregated blob.
+ */
+function processEntityPackageZip(sourceZipPath, parentTargetDir, rawRelativePath) {
+  // ---------- 1) unzip -------------------------------------------------------
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pkg-"));
+  const zip = new AdmZip(sourceZipPath);
+  zip.extractAllTo(tmpRoot, true);
+
+  // Locate first entity.json inside extracted tree
+  const candidate = walkForEntityJson(tmpRoot);
+  if (!candidate) {
+    console.warn("No entity.json inside", sourceZipPath);
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+    return null;
+  }
+
+  const { entityDir, entityJsonPath } = candidate;
+
+  // ---------- 2) read spec ---------------------------------------------------
+  const entityJson = parseJsonFile(entityJsonPath);
+  if (!entityJson) {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+    return null;
+  }
+
+  const entityType = getTopLevelFolder(rawRelativePath);
+  let digest = buildDigest(entityJson, entityType);
+
+  // decide the final folder name
+  const fallbackName = stripJsonExtension(path.basename(sourceZipPath));
+  const finalFolderName = sanitizeForFilesystem(digest.name || fallbackName);
+
+  // ---------- 3) move folder into docs tree ---------------------------------
+  const destFolder = path.join(parentTargetDir, finalFolderName);
+  ensureDirExists(path.dirname(destFolder));
+  fs.renameSync(entityDir, destFolder);
+
+  // ---------- 4) rewrite media refs -----------------------------------------
+  recursivelyRewriteEntityFolder(
+    destFolder,
+    path.posix.join(
+      path.dirname(rawRelativePath.replace(/\.zip$/i, "")),
+      finalFolderName
+    )
+  );
+
+  // re-read digest after rewrite
+  const rewritten = parseJsonFile(path.join(destFolder, "entity.json"));
+  if (rewritten && rewritten.spec) {
+    digest = buildDigest(rewritten, entityType);
+  }
+
+  // ---------- 5) create index entry -----------------------------------------
+  const parentDirRel = path.posix.dirname(rawRelativePath).replace(/\.zip$/i, "");
+  const indexPath =
+    parentDirRel === "." ? finalFolderName : path.posix.join(parentDirRel, finalFolderName);
 
   return {
     name: digest.name || fallbackName,
