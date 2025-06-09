@@ -9,6 +9,7 @@ By following these instructions, you can:
 3. Host that generated site locally (or on any static hosting platform).
 4. Optionally run a minimal **admin interface** (`metadata-admin-server.js`) to edit repository-level metadata.
 5. Preview your content locally with `local-server.js`.
+6. Edit release notes stored in `whats-new.json` using `whats-new.js`.
 
 ---
 
@@ -23,10 +24,9 @@ By following these instructions, you can:
   * [1. metadata-admin-server.js](#1-metadata-admin-serverjs)
   * [2. generate-index.js](#2-generate-indexjs)
   * [3. local-server.js](#3-local-serverjs)
+  * [4. whats-new.js](#4-whats-newjs)
 * [Featured Items](#featured-items)
-* [JSON Export/Import Reference (SoundSetJSONManager)](#json-exportimport-reference-soundsetjsonmanager)
 * [Typical Workflow](#typical-workflow)
-* [License](#license)
 
 ---
 
@@ -54,7 +54,7 @@ Clone or download this repository. Inside the directory, you should see:
 ├─ generate-index.js
 ├─ local-server.js
 ├─ metadata-admin-server.js
-├─ SoundSetJSONManager.swift
+├─ whats-new.js
 ├─ config.sample.json
 └─ ... (other files)
 ```
@@ -144,7 +144,9 @@ node metadata-admin-server.js
    * Parses it, extracts images/audio if found as Base64, and writes them into the output folder.
    * Generates an `entity.json` with updated references (pointing to the newly extracted media).
    * Produces an `index.json` in each directory, listing items present (including `downloadURL` for non-JSON files).
-4. The final output folder can then be served or hosted anywhere.
+   * Handles `.zip` packages exported by the app, automatically unpacking and indexing them.
+4. If a `whats-new.json` file exists at the repository root, it is copied to the docs root.
+5. The final output folder can then be served or hosted anywhere.
 
 **Usage**:
 
@@ -169,6 +171,19 @@ node local-server.js
 * Serves files directly from `targetDir` as set in `config.json`.
 * Any directory requests automatically serve that folder’s `index.json` if it exists.
 * Useful for previewing or local testing before deploying the site.
+
+### 4. `whats-new.js`
+
+A lightweight editor for a `whats-new.json` file that describes recent changes.
+
+**Usage**:
+
+```bash
+node whats-new.js
+```
+
+* Opens an editor at [http://localhost:5000/editor](http://localhost:5000/editor).
+* Saves the JSON to your `sourceDir` whenever you hit "Save".
 
 ---
 
