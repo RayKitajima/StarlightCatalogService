@@ -3,8 +3,7 @@
 This repository provides a **catalog service** for \[Radio Starlight], a generative radio station application. It is a self-contained toolset enabling you to organize various entities (such as **SoundSets**, **Programs**, **Persons**, etc.) into a browsable "catalog," which Radio Starlight can access and import.
 
 By following these instructions, you can:
-
-1. Maintain a local "Repository" of JSON entities, images, and other media files.
+1. Maintain a local "Repository" of entity packages (usually `.zip` archives) along with images and other media files.
 2. Automatically generate a **static site** (`docs/`) that indexes these entities, using **`generate-index.js`**.
 3. Host that generated site locally (or on any static hosting platform).
 4. Optionally run a minimal **admin interface** (`metadata-admin-server.js`) to edit repository-level metadata.
@@ -32,14 +31,13 @@ By following these instructions, you can:
 
 ## Overview
 
-* **Repository (sourceDir)**: This folder contains your raw JSON entities and any embedded or referenced media. In Radio Starlight, these JSON files might be exported by [Radio Starlight] itself. 
+* **Repository (sourceDir)**: This folder now typically contains zipped entity packages (e.g. `Programs/MyShow.zip`). Each archive bundles an `entity.json` and its media. `generate-index.js` can still read standalone JSON files, but using zip archives is recommended.
 * **Docs (targetDir)**: After running `generate-index.js`, a structured site is created, containing:
 
-  * A folder (or subfolder) for each entity (with its processed `entity.json`).
-  * Any extracted images or audio files.
-  * Automatically generated `index.json` files to allow hierarchical browsing.
+  * Each zip archive becomes a folder with its final `entity.json` and extracted images.
+  * Program archives additionally include `entity+deps.json` with bundled dependencies.
+  * Automatically generated `index.json` files allow hierarchical browsing.
 
-Once the site is generated, you can serve it via `local-server.js` (or any static server) so that Radio Starlight (or any other client) can fetch the catalog data.
 
 ---
 
@@ -64,31 +62,30 @@ Clone or download this repository. Inside the directory, you should see:
 ## Repository Structure
 
 Your **Repository** (`sourceDir`) typically follows this pattern:
-
 ```
+
 CatalogRepository/
+│
+├─ Programs/
+│   ├─ Featured/
+│   │   └─ MyShow.zip
+│   └─ MyShow.zip
 │
 ├─ Persons/
 │   ├─ Featured/
-│   │   └─ (featured person's JSON files)
-│   └─ (other subfolders or JSON files)
+│   │   └─ Announcer.zip
+│   └─ Announcer.zip
 │
 ├─ SoundSets/
-│   ├─ Featured/
-│   │   └─ (featured soundset's JSON files)
-│   └─ (other subfolders or JSON files)
+│   └─ MySet.zip
 │
 ├─ Feeds/
-│   ├─ Featured/
-│   │   └─ ...
-│   └─ ...
+│   └─ MyFeed.zip
 │
 ├─ repo-metadata.json  <-- Optional folder-level metadata
-│
 └─ ...
 ```
-
-> **Note:** The repository can have arbitrary subfolders for organizational purposes. However, if you are using the Featured functionality in Radio Starlight, the application **only** looks at the items (JSON files) **directly** under the `Featured` folder itself. Files placed in nested subfolders **inside** `Featured` will **not** be listed as featured items. (Catalog browser will show them.)
+> **Note:** The repository can have arbitrary subfolders for organization, and you may place either `.zip` archives or raw JSON files. When using the `Featured` folder, only the items placed **directly** inside `Featured` are listed as featured items; nested subfolders are ignored (though the catalog browser will still show them).
 
 ---
 
@@ -139,12 +136,13 @@ node metadata-admin-server.js
 
 1. **Clears** the target folder (removing old contents).
 2. Recursively scans the source directory.
-3. For each JSON entity or folder:
+3. For each `.zip` archive or standalone JSON entity:
 
    * Parses it, extracts images/audio if found as Base64, and writes them into the output folder.
    * Generates an `entity.json` with updated references (pointing to the newly extracted media).
    * Produces an `index.json` in each directory, listing items present (including `downloadURL` for non-JSON files).
-   * Handles `.zip` packages exported by the app, automatically unpacking and indexing them.
+   * Handles `.zip` packages exported by the app, automatically unpacking them.
+     Program archives become folders with their resources and an `entity+deps.json` file, while other entity archives become folders containing `entity.json` and images.
 4. If a `whats-new.json` file exists at the repository root, it is copied to the docs root.
 5. The final output folder can then be served or hosted anywhere.
 
@@ -189,16 +187,16 @@ node whats-new.js
 
 ## Featured Items
 
-Inside each entity directory (e.g. `Persons/`, `Feeds/`, `SoundSets/`), you can place a subfolder named **`Featured`**. Any **JSON entities** placed *directly* in that `Featured` folder are picked up as "featured" items by Radio Starlight.
+Inside each entity directory (e.g. `Persons/`, `Feeds/`, `SoundSets/`), you can place a subfolder named **`Featured`**. Any zipped packages (or JSON files) placed *directly* in that `Featured` folder are picked up as "featured" items by Radio Starlight.
 
 Example:
 
 ```
 SoundSets/
 └─ Featured/
-   ├─ MyCoolSet.json
-   ├─ AnotherFeaturedSet.json
-   └─ MySingleFileSoundSet.json
+   ├─ MyCoolSet.zip
+   ├─ AnotherFeaturedSet.zip
+   └─ MySingleFileSoundSet.zip
 ```
 
 Radio Starlight’s catalog browser will list these items as "Featured" in the app, also nested items in subfolders will be shown.
@@ -209,8 +207,8 @@ Radio Starlight’s catalog browser will list these items as "Featured" in the a
 
 1. **Prepare the Repository**
 
-   * Export your JSON entities from Radio Starlight (or create them manually).
-   * Place your JSON files and any subfolders into the `sourceDir` (e.g. `CatalogRepository/`).
+   * Export your entities as `.zip` packages from Radio Starlight (you can also use raw JSON).
+   * Place those archives (or JSON files) into the `sourceDir` (e.g. `CatalogRepository/`).
    * Run `metadata-admin-server.js` to set top-level metadata (like the repository name/description).
 2. **Generate the Docs Site**
 
