@@ -1038,28 +1038,44 @@ function setApiContentImageSource(spec, absoluteUrl) {
 }
 
 /**
- * If a spec still carries a “local” / “generated” soundSource, convert it to
- * `{ kind:"remote", url:"<BASE_URL>/<sanitized‑path>" }`.
+ * Recursively convert **every** `{kind:"local"| "generated", url:"…"}` sound
+ * reference in the given object tree to `{kind:"remote", url:"<BASE_URL>/…"}`.
+ *
+ * This covers:
+ *   • soundElement                     →  entity.soundSource
+ *   • soundSet BGM / jingle arrays     →  element.soundSource
+ *   • any future nested structures     →  walks **depth‑first**
+ *
+ * @param {object} node       Any JS value; objects & arrays are traversed.
+ * @param {string} parentRel  Folder path (POSIX) used to build the remote URL.
  */
-function rewriteSoundSourceToRemote(spec, parentRel) {
-  if (
-    !spec ||
-    !spec.soundSource ||
-    (spec.soundSource.kind !== "local" && spec.soundSource.kind !== "generated")
-  ) {
-    return; // nothing to do
+function rewriteSoundSourceToRemote(node, parentRel) {
+  if (Array.isArray(node)) {
+    for (const item of node) rewriteSoundSourceToRemote(item, parentRel);
+    return;
   }
 
-  // Build a clean, POSIX‑style relative path, then turn it into an absolute URL
-  const relAudioPath = path.posix.join(
-    sanitizeWholePath(parentRel),
-    spec.soundSource.url || ""
-  ).replace(/^[./]+/, ""); // drop any leading “./” or “../”
+  if (!node || typeof node !== "object") return;
 
-  spec.soundSource = {
-    kind: "remote",
-    url: `${BASE_URL}/${relAudioPath}`,
-  };
+  // Convert this level -------------------------------------------------------
+  if (
+    node.soundSource &&
+    (node.soundSource.kind === "local" || node.soundSource.kind === "generated")
+  ) {
+    const relAudioPath = path.posix
+      .join(sanitizeWholePath(parentRel), node.soundSource.url || "")
+      .replace(/^[./]+/, ""); // trim leading "./" or "../"
+
+    node.soundSource = {
+      kind: "remote",
+      url: `${BASE_URL}/${relAudioPath}`,
+    };
+  }
+
+  // Recurse into child properties -------------------------------------------
+  for (const value of Object.values(node)) {
+    rewriteSoundSourceToRemote(value, parentRel);
+  }
 }
 
 /**
@@ -1230,7 +1246,7 @@ function extractEmbeddedMediaAndRewrite(
   // 4)  FINAL PASS  ·  Convert any lingering local/generated soundSource
   //                   (typical for stand‑alone soundElements) to “remote”.
   // ----------------------------------------------------------------------
-  rewriteSoundSourceToRemote(spec, parentRel);
+  rewriteSoundSourceToRemote(json, parentRel);
 }
 
 /**
