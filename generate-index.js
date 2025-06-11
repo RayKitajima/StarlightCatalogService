@@ -1038,6 +1038,31 @@ function setApiContentImageSource(spec, absoluteUrl) {
 }
 
 /**
+ * If a spec still carries a “local” / “generated” soundSource, convert it to
+ * `{ kind:"remote", url:"<BASE_URL>/<sanitized‑path>" }`.
+ */
+function rewriteSoundSourceToRemote(spec, parentRel) {
+  if (
+    !spec ||
+    !spec.soundSource ||
+    (spec.soundSource.kind !== "local" && spec.soundSource.kind !== "generated")
+  ) {
+    return; // nothing to do
+  }
+
+  // Build a clean, POSIX‑style relative path, then turn it into an absolute URL
+  const relAudioPath = path.posix.join(
+    sanitizeWholePath(parentRel),
+    spec.soundSource.url || ""
+  ).replace(/^[./]+/, ""); // drop any leading “./” or “../”
+
+  spec.soundSource = {
+    kind: "remote",
+    url: `${BASE_URL}/${relAudioPath}`,
+  };
+}
+
+/**
  * Extracts embedded media (image/audio) from an entity JSON (if present) and
  * rewrites references to use remote URLs pointing to the extracted files.
  *
@@ -1200,6 +1225,12 @@ function extractEmbeddedMediaAndRewrite(
 
   // Done
   json.spec = spec;
+
+  // ----------------------------------------------------------------------
+  // 4)  FINAL PASS  ·  Convert any lingering local/generated soundSource
+  //                   (typical for stand‑alone soundElements) to “remote”.
+  // ----------------------------------------------------------------------
+  rewriteSoundSourceToRemote(spec, parentRel);
 }
 
 /**
