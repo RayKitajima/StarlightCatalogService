@@ -1,14 +1,90 @@
 # Starlight Catalog Service
 
+Make Your Formats Portable  
+*A super‑simple, open way to share Programs, Personas, Sound Sets, and presets*
+
 This repository provides a **catalog service** for \[Radio Starlight], a generative radio station application. It is a self-contained toolset enabling you to organize various entities (such as **SoundSets**, **Programs**, **Persons**, etc.) into a browsable "catalog," which Radio Starlight can access and import.
 
 By following these instructions, you can:
+
 1. Maintain a local "Repository" of entity packages (usually `.zip` archives) along with images and other media files.
 2. Automatically generate a **static site** (`docs/`) that indexes these entities, using **`generate-index.js`**.
 3. Host that generated site locally (or on any static hosting platform).
 4. Optionally run a minimal **admin interface** (`metadata-admin-server.js`) to edit repository-level metadata.
 5. Preview your content locally with `local-server.js`.
 6. Edit release notes stored in `whats-new.json` using `whats-new.js`.
+
+#### TL;DR
+
+*Portable: importable formats anyone can use in Radio Starlight*
+
+- Controlled: you publish only what you want—keep attribution intact
+- Zero‑backend: static JSON + media, host anywhere (Pages, Netlify, S3, internal)
+
+#### What is the Starlight Catalog?
+
+- A static catalog of Programs, Persons, Sound Sets, and content presets.
+- Generated from zipped exports from Radio Starlight.
+- Browsable JSON + media that Starlight can import via URL.
+- No lock‑in: plain files you can version in Git
+- Fast onboarding: collaborators import ready‑to‑use formats
+- Works online or in secure, offline environments
+
+#### Who should publish?
+
+- Share formats and Sound Sets with collaborators or fans
+- Keep persona + sound consistent across episodes
+- Publish selectively—building blocks or full Programs
+- Publishers & Rights Holders
+- Distribute official templates with attribution baked in.
+- Reproducible Programs (bundle dependencies).
+- Curate highlights using a simple Featured folder.
+
+#### Benefits — Creators
+
+- Consistent on‑air personality and Sound Set across episodes
+- Selective sharing: publish only what you want reused
+
+#### Benefits — Publishers & Rights Holders
+
+- Attribution and credits preserved in every import.
+- Reproducible shows: Program packages can include dependencies.
+- Spotlight approved items with a Featured/ folder.
+
+#### Benefits — Developers & Integrators
+
+- Works offline; preview locally with a tiny HTTP server.
+- Host on static platforms; no custom backend required.
+
+#### Curation & discoverability
+
+- Provide clear names, descriptions, and cover images.
+- Keep a simple changelog via whats-new.json so consumers see updates.
+
+#### Hosting options
+
+- Netlify, Vercel, Cloudflare Pages (global CDN).
+- Amazon S3 + CloudFront or any internal web server.
+- Local‑only for secure or air‑gapped workflows.
+
+#### Governance & responsible use
+
+- Rights: publish only content you control or have licensed.
+- Privacy: keep catalogs private or internal when needed.
+- Revocation: update or remove items and regenerate the site.
+
+#### Common objections — and responses
+
+- *“We need control.” → Static catalogs are curated and versioned by you*
+- “We can’t add infra.” → Use simple static providers or internal hosting
+- “What about lock‑in?” → It’s plain JSON + media with open tooling
+
+#### Call to action
+
+*Decide what you want to share (Program vs. Broadcast vs. building blocks).*
+
+Publish a minimal catalog with one Featured item.  
+Share the URL with collaborators or early adopters.  
 
 ---
 
