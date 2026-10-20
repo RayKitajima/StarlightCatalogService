@@ -220,7 +220,8 @@ node metadata-admin-server.js
    * Handles `.zip` packages exported by the app, automatically unpacking them.
      Program archives become folders with their resources and an `entity+deps.json` file, while other entity archives become folders containing `entity.json` and images.
 4. If a `whats-new.json` file exists at the repository root, it is copied to the docs root.
-5. The final output folder can then be served or hosted anywhere.
+5. **Passthrough directories**: a directory that contains a `passthrough.json` marker file is copied verbatim (see below).
+6. The final output folder can then be served or hosted anywhere.
 
 **Usage**:
 
@@ -230,6 +231,33 @@ node generate-index.js
 
 * Ensure you have a valid `config.json` in the same directory.
 * After it completes, look in your `targetDir` (e.g. `../CatalogSite/docs`) for the generated site.
+
+#### Passthrough directories
+
+Some trees are published for direct download rather than for the catalog
+browser, for example `Feeds/Directory/` (the Radio Starlight feed directory:
+`index.json` plus `<lang>/<category>.json` shards, fetched by the app from a
+fixed URL). Put an empty JSON file named `passthrough.json` (content `{}`; it may
+hold a short `description` for maintainers) in such a directory. Then
+`generate-index.js`:
+
+* copies every file and subfolder in it verbatim, keeping names exactly (no
+  space-to-dash renaming), except hidden files and the marker itself;
+* does no entity processing (JSON files are copied as-is, zip files are not
+  unpacked) and writes no `index.json` of its own inside it, so an `index.json`
+  in the source is published unchanged;
+* does **not** list the directory in the parent folder's `index.json` `items`,
+  so the catalog browser never opens it.
+
+Other folders are processed exactly as before.
+
+```
+CatalogRepository/Feeds/Directory/
+├─ passthrough.json   <-- marker (not published)
+├─ index.json         <-- published as-is
+├─ CREDITS.md, LICENSE.md
+└─ ja/news.json, en/technology.json, ...
+```
 
 ### 3. `local-server.js`
 

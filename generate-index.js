@@ -22,6 +22,11 @@
  *       (images/audio) and rewriting references to remote URLs.
  *    c) Write the final entity JSON and produce an index entry referencing it.
  * 4) **For non-JSON files**, copy them as-is and note a `downloadURL` in the index.
+ * 4b) **Passthrough directories**: a directory containing a "passthrough.json"
+ *    marker is copied verbatim (every file except the marker and hidden files,
+ *    no entity processing, no index.json generated inside it) and is NOT listed
+ *    in the parent directory's "items". Clients fetch it by direct URL
+ *    (e.g. Feeds/Directory/ for the app's feed directory).
  * 5) **Generate an index.json** in each directory with the shape:
  *    {
  *      "info": { / Directory metadata (if any) / },
@@ -43,6 +48,9 @@ const os = require("os");
 
 // The JSON file name that, if present in a directory, is read into the "info" field of index.json
 const REPO_METADATA_FILENAME = "repo-metadata.json";
+
+// A directory containing this marker file is copied verbatim and not indexed.
+const PASSTHROUGH_MARKER = "passthrough.json";
 
 /**
  * Load the user-supplied configuration from "config.json".
@@ -143,6 +151,26 @@ function ensureDirExists(dirPath) {
 function copyFile(sourcePath, targetPath) {
   ensureDirExists(path.dirname(targetPath));
   fs.copyFileSync(sourcePath, targetPath);
+}
+
+/**
+ * Copy a passthrough directory verbatim: every file and subfolder (names kept
+ * exactly), skipping hidden entries and the passthrough marker at its root.
+ * No entity processing and no index.json generation happens inside it.
+ */
+function copyPassthroughDir(sourceDir, targetDir, isRoot = true) {
+  ensureDirExists(targetDir);
+  for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+    if (entry.name.startsWith(".")) continue;
+    if (isRoot && entry.name === PASSTHROUGH_MARKER) continue;
+    const src = path.join(sourceDir, entry.name);
+    const dst = path.join(targetDir, entry.name);
+    if (entry.isDirectory()) {
+      copyPassthroughDir(src, dst, false);
+    } else if (entry.isFile()) {
+      copyFile(src, dst);
+    }
+  }
 }
 
 /**
@@ -300,6 +328,13 @@ function recurseAndBuildAllIndexes(sourceDir, targetDir, webRelativePath = "") {
     const nextRelativePath = webRelativePath
       ? path.join(webRelativePath, entry.name)
       : entry.name;
+
+    if (entry.isDirectory() && fs.existsSync(path.join(childSourcePath, PASSTHROUGH_MARKER))) {
+      // => Passthrough directory: copy verbatim, do not list it in this index
+      copyPassthroughDir(childSourcePath, path.join(targetDir, entry.name));
+      console.log("Copied passthrough directory:", nextRelativePath);
+      continue;
+    }
 
     if (entry.isDirectory()) {
       // Check if the directory has an "entity.json"
