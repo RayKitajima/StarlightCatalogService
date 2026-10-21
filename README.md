@@ -120,6 +120,13 @@ Share the URL with collaborators or early adopters.
 ## Prerequisites
 
 * **Node.js** (v14 or higher recommended)
+* **`adm-zip`** — the only npm dependency; `generate-index.js` uses it to unpack
+  `.zip` packages. Install it once in this directory:
+
+  ```bash
+  npm install adm-zip
+  ```
+
 * Basic familiarity with the command line and JSON.
 
 Clone or download this repository. Inside the directory, you should see:
@@ -230,6 +237,7 @@ node generate-index.js
 ```
 
 * Ensure you have a valid `config.json` in the same directory.
+* Requires `adm-zip` (see [Prerequisites](#prerequisites)); without it Node reports `Cannot find module 'adm-zip'`.
 * After it completes, look in your `targetDir` (e.g. `../CatalogSite/docs`) for the generated site.
 
 #### Passthrough directories
